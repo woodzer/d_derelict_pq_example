@@ -1,0 +1,13 @@
+{
+	"name": "pqtest",
+	"authors": [
+		"Ubuntu"
+	],
+	"dependencies": {
+		"derelict-pq": "~>2.2.0"
+	},
+	"description": "A minimal D application.",
+	"copyright": "Copyright © 2018, Ubuntu",
+	"license": "proprietary",
+	"libs": ["pq"]
+}
