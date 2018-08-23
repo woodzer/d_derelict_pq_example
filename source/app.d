@@ -1,4 +1,5 @@
 import std.array;
+import std.conv;
 import std.bitmanip;
 import std.datetime;
 import std.format;
@@ -46,21 +47,38 @@ bool createTable(PGconn *connection) {
     return(status == PGRES_COMMAND_OK);
 }
 
+/**
+ * This function inserts 1000 rows into the accounts_test table.
+ */
 void populateAccountsTable(PGconn *connection) {
-	string sql = "insert into accounts_test(user_name, balance, created_at, updated_at) " ~
-	             "values($1::varchar, $2::real, $3::timestamp, $3::timestamp) returning id";
-	auto   random = Random(1000);
+	string         sql    = "insert into accounts_test(user_name, balance, created_at, updated_at) " ~
+	                        "values($1::varchar, $2::real, $3::timestamp, $3::timestamp) returning id";
+	auto           random = Random(1000);
+    PGresult       *result;
+    ExecStatusType status;
+    bool           successful = true;
+
+    writeln("Starting the create records transaction.");
+    result = PQexec(connection, toStringz("begin transaction"));
+    status = PQresultStatus(result);
+    if(status != PGRES_COMMAND_OK) {
+        throw(new Exception("Failed to start transaction, return status was " ~ getResultStatusName(result) ~ "."));
+    }
+    PQclear(result);
+    writeln("Create records transaction successfully started.");
 
     try {
+        writeln("About to enter loop.");
 	    for(auto i = 0; i < 1000; i++) {
+            float     balanceValue     = uniform(0.0, 1000.0, random);
 	    	auto      email            = format("email.%05d@nowhere.com", i),
 	    	          now              = formatDateTime(cast(DateTime)Clock.currTime()),
-	    	          balance          = format("%f", uniform(0.0, 1000.0, random));
+	    	          balance          = format("%g", balanceValue);
 	    	ubyte*[3] parameters;
 	    	uint*     parameterTypes   = cast(uint*)(null);
             int[3]    parameterLengths,
                       parameterFormats = [0, 0, 0];
-            
+
             parameterLengths[0] = cast(int)(email.length + 1);
             parameterLengths[1] = cast(int)(balance.length + 1);
             parameterLengths[2] = cast(int)(now.length + 1);
@@ -69,21 +87,109 @@ void populateAccountsTable(PGconn *connection) {
             parameters[1] = cast(ubyte*)(toStringz(balance));
             parameters[2] = cast(ubyte*)(toStringz(now));
 
-            writeln(format("Creating Account: email= %s, balance=%.02f", email, balance));
-            auto result = PQexecParams(connection,
-            	                       toStringz(sql),
-            	                       parameters.length,
-            	                       cast(const(uint)*)(null),
-		    	                       cast(const ubyte**)(parameters.ptr),
-		    	                       cast(const int*)(parameterLengths.ptr),
-		    	                       cast(const int*)(parameterFormats.ptr),
-            	                       1);
+            writeln(format("Creating Account: email= %s, balance=%.02f (%s)", email, balanceValue, balance));
+            result = PQexecParams(connection,
+                                  toStringz(sql),
+                                  parameters.length,
+                                  cast(const(uint)*)(null),
+                                  cast(const ubyte**)(parameters.ptr),
+                                  cast(const int*)(parameterLengths.ptr),
+                                  cast(const int*)(parameterFormats.ptr),
+                                  1);
             scope(exit) PQclear(result);
+
+            status = PQresultStatus(result);
+            if(status != PGRES_TUPLES_OK) {
+                throw(new Exception(format("Failed to create database row, return status was %s.", getResultStatusName(result))));
+            }
 	    }
 	} catch(Exception exception) {
+        writeln("Exception caught rolling back transaction.");
 		auto outcome = PQexec(connection, toStringz("rollback transsaction"));
+        successful = false;
 		PQclear(outcome);
+        throw(exception);
 	}
+
+    if(successful) {
+        writeln("Committing the create records transaction.");
+        result = PQexec(connection, toStringz("commit"));
+        status = PQresultStatus(result);
+        if(status != PGRES_COMMAND_OK) {
+            throw(new Exception("Failed to commit transaction, return status was " ~ getResultStatusName(result) ~ "."));
+        }
+        scope(exit) PQclear(result);
+        writeln("Create records transaction successfully committed.");
+    }
+}
+
+/**
+ * This function list records in the accounts_test table with a balance greater
+ * than 500.0.
+ */
+void listTableContents(PGconn* connection) {
+    string         sql    = "select id, email, balance, created_at, updated_at " ~
+                            "from accounts_test where balance > $1::float";
+    PGresult       *result;
+    ExecStatusType status;
+    string         balanceText = "500.0";
+    ubyte*[1]      parameters;
+    int[1]         parameterLengths,
+                   parameterFormats = [0];
+
+    parameters[0]       = cast(ubyte*)toStringz(balanceText);
+    parameterLengths[0] = cast(int)(balanceText.length + 1);
+    result = PQexecParams(connection,
+                          toStringz(sql),
+                          parameters.length,
+                          cast(const(uint)*)(null),
+                          cast(const ubyte**)(parameters.ptr),
+                          cast(const int*)(parameterLengths.ptr),
+                          cast(const int*)(parameterFormats.ptr),
+                          0);
+    scope(exit) PQclear(result);
+
+    status = PQresultStatus(result);
+    writeln(format("RESULT: %s", getResultStatusName(result)));
+
+    auto     rowCount    = PQntuples(result),
+             columnCount = PQnfields(result);
+    string[] columnNames;
+
+    for(auto i = 0; i < columnCount; i++) {
+        string name = fromStringz(PQfname(result, i)).idup;
+
+        writeln(format("%d: %s", i, name));
+        columnNames ~= name;
+    }
+    writeln("Column Names: ", columnNames.join(", "));
+
+    for(auto row = 0; row < rowCount; row++) {
+        int      id;
+        string   email,
+                 value;
+        float    balance;
+        string   createdAt,
+                 updatedAt;
+
+        value = fromStringz(cast(char*)PQgetvalue(result, row, 0)).idup;
+        id    = to!int(value);
+
+        value = fromStringz(cast(char*)PQgetvalue(result, row, 1)).idup;
+        email = value;
+
+        value   = fromStringz(cast(char*)PQgetvalue(result, row, 2)).idup;
+        balance = to!float(value);
+
+        value     = fromStringz(cast(char*)PQgetvalue(result, row, 3)).idup;
+        createdAt = value;
+
+        value     = fromStringz(cast(char*)PQgetvalue(result, row, 3)).idup;
+        updatedAt = value;
+
+        writeln(format("ROW: id=%d, email='%s', balance=%f, created_at=%s, updated_at=%s",
+                       id, email, balance, createdAt, updatedAt));
+    }
 }
 
 void selectExample(PGconn *connection) {
@@ -142,6 +248,7 @@ void main() {
 		if(createTable(connection)) {
 			writeln("The accounts_test table was successfully created.");
 			populateAccountsTable(connection);
+            listTableContents(connection);
 		} else {
 			writeln("Creation of the accounts_test failed, no further functionality may be attempted.");
 		}
