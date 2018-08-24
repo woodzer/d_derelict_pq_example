@@ -26,6 +26,10 @@ string getResultStatusName(PGresult *result) {
 	return(fromStringz(PQresStatus(PQresultStatus(result))).idup);
 }
 
+string getResultErrorMessage(PGresult *result) {
+    return(fromStringz(PQresultErrorMessage(result)).idup);
+}
+
 /**
  * This function creates an accounts_test table in the attached database that
  * will be used by subsequent functions.
@@ -48,12 +52,51 @@ bool createTable(PGconn *connection) {
 }
 
 /**
+ * This function deletes the contents of the accounts_test table.
+ */
+bool emptyTable(PGconn* connection) {
+    auto   result = PQexec(connection, toStringz("delete from accounts_test"));
+    auto   status = PQresultStatus(result);
+
+    scope(exit) PQclear(result);
+    if(status != PGRES_COMMAND_OK) {
+        writeln("Delete table records failed.  Reason: ", fromStringz(PQresultErrorMessage(result)).idup);
+    } else {
+        writeln("Table records successfully deleted.");
+    }
+
+    return(status == PGRES_COMMAND_OK);
+}
+
+/**
+ * This function empties the accounts_test table and then drops it.
+ */
+bool dropTable(PGconn *connection) {
+    bool outcome = emptyTable(connection);
+
+    if(outcome) {
+        auto   result = PQexec(connection, toStringz("drop table accounts_test"));
+        auto   status = PQresultStatus(result);
+
+        scope(exit) PQclear(result);
+        if(status != PGRES_COMMAND_OK) {
+            writeln("Drop table failed.  Reason: ", fromStringz(PQresultErrorMessage(result)).idup);
+        } else {
+            writeln("Table successfully dropped.");
+            outcome = true;
+        }        
+    }
+
+    return(outcome);
+}
+
+/**
  * This function inserts 1000 rows into the accounts_test table.
  */
 void populateAccountsTable(PGconn *connection) {
 	string         sql    = "insert into accounts_test(user_name, balance, created_at, updated_at) " ~
 	                        "values($1::varchar, $2::real, $3::timestamp, $3::timestamp) returning id";
-	auto           random = Random(1000);
+	auto           random = Random(cast(int)(Clock.currTime().toUnixTime()));
     PGresult       *result;
     ExecStatusType status;
     bool           successful = true;
@@ -128,7 +171,7 @@ void populateAccountsTable(PGconn *connection) {
  * than 500.0.
  */
 void listTableContents(PGconn* connection) {
-    string         sql    = "select id, email, balance, created_at, updated_at " ~
+    string         sql    = "select id, user_name, balance, created_at, updated_at " ~
                             "from accounts_test where balance > $1::float";
     PGresult       *result;
     ExecStatusType status;
@@ -150,7 +193,10 @@ void listTableContents(PGconn* connection) {
     scope(exit) PQclear(result);
 
     status = PQresultStatus(result);
-    writeln(format("RESULT: %s", getResultStatusName(result)));
+    writeln(format("RESULT: %s\n", getResultStatusName(result)));
+    if(PQresultStatus(result) != PGRES_TUPLES_OK) {
+        throw(new Exception("Select failed. Reason: " ~ getResultErrorMessage(result)));
+    }
 
     auto     rowCount    = PQntuples(result),
              columnCount = PQnfields(result);
@@ -187,49 +233,10 @@ void listTableContents(PGconn* connection) {
         value     = fromStringz(cast(char*)PQgetvalue(result, row, 3)).idup;
         updatedAt = value;
 
-        writeln(format("ROW: id=%d, email='%s', balance=%f, created_at=%s, updated_at=%s",
+        writeln(format("ROW: id=%d, email='%s', balance=%.02f, created_at=%s, updated_at=%s",
                        id, email, balance, createdAt, updatedAt));
     }
-}
-
-void selectExample(PGconn *connection) {
-	string    sql         = "select * from users where id = $1::int4";
-	int       userId      = endianAdjust(1),
-	          format      = 1;
-	ubyte*[1] parameters;
-	uint[1]   parameterTypes;
-    int[1]    parameterLengths,
-              parameterFormats;
-
-	parameters[0]       = cast(ubyte*)(&userId);
-	parameterTypes[0]   = 0;
-    parameterLengths[0] = userId.sizeof;
-    parameterFormats[0] = format;
-
-    auto result = PQexecParams(connection,
-    	                       	toStringz(sql),
-    	                       	parameters.length,
-    	                       	cast(const(uint)*)(parameterTypes.ptr),
-    	                       	cast(const ubyte**)(parameters.ptr),
-    	                       	cast(const int*)(parameterLengths.ptr),
-    	                       	cast(const int*)(parameterFormats.ptr),
-    	                       	format);
-    scope(exit) PQclear(result);
-
-    if(PQresultStatus(result) == PGRES_TUPLES_OK) {
-    	auto     columnCount = PQnfields(result),
-    	         rowCount    = PQntuples(result);
-    	string[] columnNames;
-
-    	writeln("Query was successful, there are ", rowCount, " rows containing ", columnCount, " columns each in the result.");
-    	for(auto i = 0; i < columnCount; i++) {
-    		string name = fromStringz(PQfname(result, i)).idup;
-    		columnNames ~= name;
-    	}
-    	writeln("  Column Names: ", columnNames.join(", "));
-    } else {
-    	throw(new Exception("Select statement failed."));
-    }
+    writeln("Listed ", rowCount, " records with a balance greater than ", balanceText, ".");
 }
 
 void main() {
@@ -249,6 +256,7 @@ void main() {
 			writeln("The accounts_test table was successfully created.");
 			populateAccountsTable(connection);
             listTableContents(connection);
+            dropTable(connection);
 		} else {
 			writeln("Creation of the accounts_test failed, no further functionality may be attempted.");
 		}
